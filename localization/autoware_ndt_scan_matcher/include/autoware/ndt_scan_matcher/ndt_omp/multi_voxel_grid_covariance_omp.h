@@ -131,12 +131,14 @@ public:
       mean_(Eigen::Vector3d::Zero()),
       centroid_(),
       cov_(Eigen::Matrix3d::Identity()),
-      icov_(Eigen::Matrix3d::Zero())
+      icov_(Eigen::Matrix3d::Zero()),
+      point_coords_()
     {
     }
 
     Leaf(const Leaf & other)
-    : mean_(other.mean_), centroid_(other.centroid_), cov_(other.cov_), icov_(other.icov_)
+    : mean_(other.mean_), centroid_(other.centroid_), cov_(other.cov_), icov_(other.icov_),
+      point_coords_(other.point_coords_)
     {
       nr_points_ = other.nr_points_;
     }
@@ -145,7 +147,8 @@ public:
     : mean_(std::move(other.mean_)),
       centroid_(std::move(other.centroid_)),
       cov_(std::move(other.cov_)),
-      icov_(std::move(other.icov_))
+      icov_(std::move(other.icov_)),
+      point_coords_(std::move(other.point_coords_))
     {
       nr_points_ = other.nr_points_;
     }
@@ -156,6 +159,7 @@ public:
       centroid_ = other.centroid_;
       cov_ = other.cov_;
       icov_ = other.icov_;
+      point_coords_ = other.point_coords_;
       nr_points_ = other.nr_points_;
 
       return *this;
@@ -167,6 +171,7 @@ public:
       centroid_ = std::move(other.centroid_);
       cov_ = std::move(other.cov_);
       icov_ = std::move(other.icov_);
+      point_coords_ = std::move(other.point_coords_);
       nr_points_ = other.nr_points_;
 
       return *this;
@@ -202,6 +207,9 @@ public:
 
     /** \brief Inverse of voxel covariance matrix */
     Eigen::Matrix3d icov_;
+
+    /** \brief Sample of point coordinates in this voxel (for debugging, max 5 points) */
+    std::vector<Eigen::Vector3f> point_coords_;
   };
 
   /** \brief Pointer to MultiVoxelGridCovariance leaf structure */

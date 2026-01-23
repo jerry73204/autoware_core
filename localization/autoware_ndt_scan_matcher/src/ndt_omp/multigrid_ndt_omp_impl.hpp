@@ -61,8 +61,48 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <utility>
 #include <vector>
+
+// Debug logging for NDT comparison
+// Enable with: export NDT_AUTOWARE_DEBUG=1
+// Output file: /tmp/ndt_autoware_debug.jsonl (or NDT_AUTOWARE_DEBUG_FILE env var)
+namespace ndt_debug
+{
+inline bool is_enabled()
+{
+  static bool enabled = std::getenv("NDT_AUTOWARE_DEBUG") != nullptr;
+  return enabled;
+}
+
+inline std::string get_debug_file()
+{
+  const char * file = std::getenv("NDT_AUTOWARE_DEBUG_FILE");
+  return file ? file : "/tmp/ndt_autoware_debug.jsonl";
+}
+
+inline void write_iteration(
+  std::ofstream & ofs, int iteration, const Eigen::Matrix<double, 6, 1> & pose, double score,
+  const Eigen::Matrix<double, 6, 1> & gradient, const Eigen::Matrix<double, 6, 6> & hessian,
+  const Eigen::Matrix<double, 6, 1> & newton_step, double step_length, int source_point_count,
+  int total_voxel_count, bool direction_reversed)
+{
+  ofs << "{\"iteration\":" << iteration << ",\"pose\":[" << pose(0) << "," << pose(1) << ","
+      << pose(2) << "," << pose(3) << "," << pose(4) << "," << pose(5)
+      << "],\"score\":" << score << ",\"gradient\":[" << gradient(0) << "," << gradient(1) << ","
+      << gradient(2) << "," << gradient(3) << "," << gradient(4) << "," << gradient(5)
+      << "],\"hessian_diag\":[" << hessian(0,0) << "," << hessian(1,1) << "," << hessian(2,2)
+      << "," << hessian(3,3) << "," << hessian(4,4) << "," << hessian(5,5)
+      << "],\"newton_step\":[" << newton_step(0) << "," << newton_step(1) << "," << newton_step(2)
+      << "," << newton_step(3) << "," << newton_step(4) << "," << newton_step(5)
+      << "],\"step_length\":" << step_length << ",\"source_point_count\":" << source_point_count
+      << ",\"total_voxel_count\":" << total_voxel_count
+      << ",\"voxels_per_point\":" << (source_point_count > 0 ? static_cast<double>(total_voxel_count) / source_point_count : 0.0)
+      << ",\"direction_reversed\":" << (direction_reversed ? "true" : "false") << "}";
+}
+}  // namespace ndt_debug
 
 namespace pclomp
 {
@@ -299,6 +339,16 @@ void MultiGridNormalDistributionsTransform<PointSource, PointTarget>::computeTra
   // in the step length determination.
   score = computeDerivatives(score_gradient, hessian, output, p, source);
 
+  // Debug logging setup
+  std::ofstream debug_ofs;
+  bool debug_enabled = ndt_debug::is_enabled();
+  if (debug_enabled) {
+    debug_ofs.open(ndt_debug::get_debug_file(), std::ios::app);
+    debug_ofs << "{\"initial_pose\":[" << p(0) << "," << p(1) << "," << p(2) << "," << p(3) << ","
+              << p(4) << "," << p(5) << "],\"num_source_points\":" << source->size()
+              << ",\"iterations\":[";
+  }
+
   while (!converged_) {
     // Store previous transformation
     previous_transformation_ = transformation_;
@@ -308,6 +358,9 @@ void MultiGridNormalDistributionsTransform<PointSource, PointTarget>::computeTra
       hessian, Eigen::ComputeFullU | Eigen::ComputeFullV);
     // Negative for maximization as opposed to minimization
     delta_p = sv.solve(-score_gradient);
+
+    // Save Newton step for debug logging before normalization
+    Eigen::Matrix<double, 6, 1> newton_step = delta_p;
 
     // Calculate step length with guaranteed sufficient decrease [More, Thuente 1994]
     double delta_p_norm = delta_p.norm();
@@ -323,11 +376,26 @@ void MultiGridNormalDistributionsTransform<PointSource, PointTarget>::computeTra
       return;
     }
 
+    bool direction_reversed = false;
     delta_p.normalize();
+    // Check if direction was reversed (will be done in computeStepLengthMT if d_phi_0 >= 0)
+    double d_phi_0 = -(score_gradient.dot(delta_p));
+    if (d_phi_0 >= 0) {
+      direction_reversed = true;
+    }
     delta_p_norm = computeStepLengthMT(
       p, delta_p, delta_p_norm, params_.step_size, params_.trans_epsilon / 2.0, score,
       score_gradient, hessian, output, source);
     delta_p *= delta_p_norm;
+
+    // Debug logging for this iteration
+    if (debug_enabled) {
+      if (nr_iterations_ > 0) debug_ofs << ",";
+      ndt_debug::write_iteration(
+        debug_ofs, nr_iterations_, p, score, score_gradient, hessian, newton_step,
+        delta_p_norm, static_cast<int>(source->size()), total_neighborhood_count_,
+        direction_reversed);
+    }
 
     transformation_ =
       (Eigen::Translation<float, 3>(
@@ -349,6 +417,17 @@ void MultiGridNormalDistributionsTransform<PointSource, PointTarget>::computeTra
       (nr_iterations_ && (std::fabs(delta_p_norm) < params_.trans_epsilon))) {
       converged_ = true;
     }
+  }
+
+  // Close debug JSON
+  if (debug_enabled) {
+    std::string status = converged_ ? "Converged" : "MaxIterations";
+    if (nr_iterations_ >= params_.max_iterations) status = "MaxIterations";
+    debug_ofs << "],\"final_pose\":[" << p(0) << "," << p(1) << "," << p(2) << "," << p(3) << ","
+              << p(4) << "," << p(5) << "],\"convergence_status\":\"" << status
+              << "\",\"total_iterations\":" << nr_iterations_ << ",\"final_score\":" << score
+              << ",\"final_nvtl\":" << nearest_voxel_transformation_likelihood_ << "}\n";
+    debug_ofs.close();
   }
 
   // Store transformation probability. The relative differences within each scan registration are
@@ -482,6 +561,9 @@ double MultiGridNormalDistributionsTransform<PointSource, PointTarget>::computeD
     hessian += hessians[i];
     total_neighborhood_count += neighborhood_counts[i];
   }
+
+  // Store for debug logging
+  total_neighborhood_count_ = total_neighborhood_count;
 
   if (regularization_pose_) {
     float regularization_score = 0.0f;
